@@ -9,8 +9,10 @@ import { z } from "zod";
 
 import { sharedPostgresStorage } from "./storage";
 import { inngest, inngestServe } from "./inngest";
-import { exampleWorkflow } from "./workflows/exampleWorkflow";
-import { exampleAgent } from "./agents/exampleAgent";
+import { telegramBotAgent } from "./agents/telegramBotAgent";
+import { checkTelegramAdminTool, sendTelegramMessageTool } from "./tools/telegramAdminTool";
+import { telegramBotWorkflow } from "./workflows/telegramBotWorkflow";
+import { registerTelegramTrigger, TriggerInfoTelegramOnNewMessage } from "../triggers/telegramTriggers";
 
 class ProductionPinoLogger extends MastraLogger {
   protected logger: pino.Logger;
@@ -56,14 +58,14 @@ class ProductionPinoLogger extends MastraLogger {
 export const mastra = new Mastra({
   storage: sharedPostgresStorage,
   // Register your workflows here
-  workflows: {},
+  workflows: { telegramBotWorkflow },
   // Register your agents here
-  agents: {},
+  agents: { telegramBotAgent },
   mcpServers: {
     allTools: new MCPServer({
       name: "allTools",
       version: "1.0.0",
-      tools: {},
+      tools: { checkTelegramAdminTool, sendTelegramMessageTool },
     }),
   },
   bundler: {
@@ -126,6 +128,46 @@ export const mastra = new Mastra({
         // 3. Establishing a publish-subscribe system for real-time monitoring
         //    through the workflow:${workflowId}:${runId} channel
       },
+      ...registerTelegramTrigger({
+        triggerType: "telegram/message",
+        handler: async (mastra: Mastra, triggerInfo: TriggerInfoTelegramOnNewMessage) => {
+          const logger = mastra.getLogger();
+          logger?.info("📝 [Telegram Trigger] Received message", { triggerInfo });
+          
+          // Only respond to /text commands
+          const message = triggerInfo.params.message;
+          if (!message || !message.startsWith('/text')) {
+            logger?.info("📝 [Telegram Trigger] Ignoring non-/text message");
+            return;
+          }
+          
+          logger?.info("📝 [Telegram Trigger] Processing /text command");
+          
+          const chatId = triggerInfo.payload?.message?.chat?.id;
+          const userId = triggerInfo.payload?.message?.from?.id;
+          const messageId = triggerInfo.payload?.message?.message_id;
+          
+          if (!chatId || !userId) {
+            logger?.error("📝 [Telegram Trigger] Missing chatId or userId");
+            return;
+          }
+          
+          // Create a thread ID based on the chat
+          const threadId = `telegram/${chatId}`;
+          
+          logger?.info("📝 [Telegram Trigger] Starting workflow", { chatId, userId, threadId });
+          
+          const run = await mastra.getWorkflow("telegramBotWorkflow").createRunAsync();
+          await run.start({
+            inputData: {
+              message,
+              threadId,
+              chatId,
+              userId,
+            }
+          });
+        },
+      }),
     ],
   },
   logger:
